@@ -108,6 +108,7 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % stiffness (springs + anti-roll bars), keeping the two roll
             % models consistent. Call after both are constructed.
             obj.suspension = suspension;
+            obj.cachedSuspensionHasRollStiffness = [];
         end
 
         function reset(obj)
@@ -251,6 +252,11 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             rollAngle = obj.state.rollAngle;
         end
 
+        function rollRate = getRollRate(obj)
+            % Whole-car roll rate [rad/s] (average of front/rear DOFs).
+            rollRate = obj.state.rollRate;
+        end
+
         function rollAngle = getFrontRollAngle(obj)
             rollAngle = obj.state.frontRollAngle;
         end
@@ -259,10 +265,23 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             rollAngle = obj.state.rearRollAngle;
         end
 
+        function rollRate = getFrontRollRate(obj)
+            rollRate = obj.state.frontRollRate;
+        end
+
+        function rollRate = getRearRollRate(obj)
+            rollRate = obj.state.rearRollRate;
+        end
+
         function twist = getTwistAngle(obj)
             % Chassis twist angle [rad] = front - rear roll. Zero when the
             % tub is torsionally rigid or under symmetric load.
             twist = obj.state.frontRollAngle - obj.state.rearRollAngle;
+        end
+
+        function twistRate = getTwistRate(obj)
+            % Chassis twist rate [rad/s] = front - rear roll rate.
+            twistRate = obj.state.frontRollRate - obj.state.rearRollRate;
         end
     end
 
