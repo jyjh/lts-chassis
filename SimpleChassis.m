@@ -108,7 +108,9 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % stiffness (springs + anti-roll bars), keeping the two roll
             % models consistent. Call after both are constructed.
             obj.suspension = suspension;
-            obj.cachedSuspensionHasRollStiffness = [];
+            obj.cachedSuspensionHasRollStiffness = ...
+                ~isempty(suspension) && ...
+                isa(suspension, 'lts.components.Suspension.SuspensionManager');
         end
 
         function reset(obj)
@@ -294,11 +296,12 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % Returns 0,0 when no suspension is linked.
             KrollF = 0;
             KrollR = 0;
-            if isempty(obj.cachedSuspensionHasRollStiffness)
-                obj.cachedSuspensionHasRollStiffness = ~isempty(obj.suspension) && ...
-                    ismethod(obj.suspension, 'getAxleRollStiffness');
+            hasRollStiffness = obj.cachedSuspensionHasRollStiffness;
+            if isempty(hasRollStiffness)
+                hasRollStiffness = ~isempty(obj.suspension) && ...
+                    isa(obj.suspension, 'lts.components.Suspension.SuspensionManager');
             end
-            if obj.cachedSuspensionHasRollStiffness
+            if hasRollStiffness
                 [KwF, KwR] = obj.suspension.getAxleRollStiffness();
                 KrollF = KwF * obj.trackWidth^2 / 2;
                 KrollR = KwR * obj.trackWidth^2 / 2;
