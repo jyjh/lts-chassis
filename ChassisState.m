@@ -37,6 +37,10 @@ classdef ChassisState < handle
         % Derived load-transfer terms for telemetry/debugging [N]
         longitudinalLoadTransfer = 0
         lateralLoadTransfer = 0
+        frontGeometricLateralLoadTransfer = 0
+        rearGeometricLateralLoadTransfer = 0
+        frontRollCenterLateral = 0
+        rearRollCenterLateral = 0
         downforcePitchMoment = 0
         dragPitchMoment = 0
         aeroPitchMoment = 0
@@ -67,6 +71,10 @@ classdef ChassisState < handle
             obj.cornerVelocity = struct('FL', 0, 'FR', 0, 'RL', 0, 'RR', 0);
             obj.longitudinalLoadTransfer = 0;
             obj.lateralLoadTransfer = 0;
+            obj.frontGeometricLateralLoadTransfer = 0;
+            obj.rearGeometricLateralLoadTransfer = 0;
+            obj.frontRollCenterLateral = 0;
+            obj.rearRollCenterLateral = 0;
             obj.downforcePitchMoment = 0;
             obj.dragPitchMoment = 0;
             obj.aeroPitchMoment = 0;

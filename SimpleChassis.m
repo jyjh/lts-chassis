@@ -172,8 +172,21 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             rearMassFrac = 1 - massFrac;
             frontAxleAy = ay + yawAccel * obj.frontArm;
             rearAxleAy  = ay - yawAccel * obj.rearArm;
-            rollMomentF = obj.sprungMass * massFrac * frontAxleAy * obj.cgHeight;
-            rollMomentR = obj.sprungMass * rearMassFrac * rearAxleAy * obj.cgHeight;
+            frontSprungMass = obj.sprungMass * massFrac;
+            rearSprungMass = obj.sprungMass * rearMassFrac;
+            [hrcF, hrcR, rclFAt1g, rclRAt1g] = obj.getRollCenterConfig();
+            rclF = obj.scaledRollCenterLateral(rclFAt1g, frontAxleAy);
+            rclR = obj.scaledRollCenterLateral(rclRAt1g, rearAxleAy);
+            rollMomentF = frontSprungMass * ...
+                (frontAxleAy * (obj.cgHeight - hrcF) + ...
+                lts.vehicle.VehicleManager.g * rclF);
+            rollMomentR = rearSprungMass * ...
+                (rearAxleAy * (obj.cgHeight - hrcR) + ...
+                lts.vehicle.VehicleManager.g * rclR);
+            geoLatFront = frontSprungMass * frontAxleAy * hrcF / ...
+                max(obj.trackWidth, eps);
+            geoLatRear = rearSprungMass * rearAxleAy * hrcR / ...
+                max(obj.trackWidth, eps);
 
             [KrollF, KrollR] = obj.getAxleRollStiffnessRad();
             CrollF = obj.rollDamping * massFrac;
@@ -225,7 +238,12 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             obj.state.longitudinalLoadTransfer = ...
                 obj.totalMass * ax * obj.cgHeight / max(obj.wheelbase, eps);
             obj.state.lateralLoadTransfer = ...
-                obj.totalMass * ay * obj.cgHeight / max(obj.trackWidth, eps);
+                (rollMomentF + rollMomentR) / max(obj.trackWidth, eps) + ...
+                geoLatFront + geoLatRear;
+            obj.state.frontGeometricLateralLoadTransfer = geoLatFront;
+            obj.state.rearGeometricLateralLoadTransfer = geoLatRear;
+            obj.state.frontRollCenterLateral = rclF;
+            obj.state.rearRollCenterLateral = rclR;
             obj.state.downforcePitchMoment = downforcePitchMoment;
             obj.state.dragPitchMoment = dragPitchMoment;
             obj.state.aeroPitchMoment = aeroPitchMoment;
@@ -290,6 +308,29 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
     end
 
     methods (Access = private)
+        function [hrcF, hrcR, rclF, rclR] = getRollCenterConfig(obj)
+            hrcF = 0;
+            hrcR = 0;
+            rclF = 0;
+            rclR = 0;
+            if isempty(obj.suspension) || ...
+                    ~isa(obj.suspension, 'lts.components.Suspension.SuspensionManager')
+                return;
+            end
+
+            hrcF = obj.suspension.frontRollCenterHeight;
+            hrcR = obj.suspension.rearRollCenterHeight;
+            rclF = obj.suspension.frontRollCenterLateral;
+            rclR = obj.suspension.rearRollCenterLateral;
+        end
+
+        function value = scaledRollCenterLateral(~, lateralAt1g, axleAy)
+            value = lateralAt1g * axleAy / lts.vehicle.VehicleManager.g;
+            if ~isfinite(value)
+                value = 0;
+            end
+        end
+
         function [KrollF, KrollR] = getAxleRollStiffnessRad(obj)
             % GETAXLEROLLSTIFFNESSRAD Per-axle roll stiffness [N*m/rad].
             % Reads the per-axle wheel-rate roll stiffness (springs + ARB)
