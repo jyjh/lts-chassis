@@ -237,8 +237,10 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         function cornerKinematics = computeCornerKinematics(obj)
             obj.state.updateCornerKinematics( ...
                 obj.wheelbase, obj.trackWidth, obj.staticFrontWeight);
-            cornerKinematics.displacement = obj.state.cornerDisplacement;
-            cornerKinematics.velocity = obj.state.cornerVelocity;
+            if nargout > 0
+                cornerKinematics.displacement = obj.state.cornerDisplacement;
+                cornerKinematics.velocity = obj.state.cornerVelocity;
+            end
         end
 
         function heave = getHeave(obj)
