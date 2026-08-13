@@ -37,6 +37,9 @@ classdef ChassisState < handle
         % Derived load-transfer terms for telemetry/debugging [N]
         longitudinalLoadTransfer = 0
         lateralLoadTransfer = 0
+        additionalLongitudinalLoadTransfer = 0
+        frontAdditionalLateralLoadTransfer = 0
+        rearAdditionalLateralLoadTransfer = 0
         frontGeometricLateralLoadTransfer = 0
         rearGeometricLateralLoadTransfer = 0
         frontRollCenterLateral = 0
@@ -71,6 +74,9 @@ classdef ChassisState < handle
             obj.cornerVelocity = struct('FL', 0, 'FR', 0, 'RL', 0, 'RR', 0);
             obj.longitudinalLoadTransfer = 0;
             obj.lateralLoadTransfer = 0;
+            obj.additionalLongitudinalLoadTransfer = 0;
+            obj.frontAdditionalLateralLoadTransfer = 0;
+            obj.rearAdditionalLateralLoadTransfer = 0;
             obj.frontGeometricLateralLoadTransfer = 0;
             obj.rearGeometricLateralLoadTransfer = 0;
             obj.frontRollCenterLateral = 0;

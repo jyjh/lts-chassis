@@ -31,14 +31,14 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         frontArm
         rearArm
 
-        % Linear platform stiffness/damping from static equilibrium.
-        % NaN = derive from the linked suspension's spring/damper rates (the
-        % default); a finite value overrides the derivation. Set by
-        % lts.vehicle.VehicleManager.fromConfig from lts.vehicle.VehicleConfig.
-        heaveStiffness    = NaN  % [N/m]  NaN = derive from suspension
-        heaveDamping      = NaN  % [N*s/m]  NaN = derive
-        pitchStiffness    = NaN  % [N*m/rad]  NaN = derive
-        pitchDamping      = NaN  % [N*m*s/rad]  NaN = derive
+        % Linear platform stiffness/damping fallback used when no physical
+        % suspension is linked. With a linked SuspensionManager, the chassis
+        % reacts against the actual corner spring/damper/bump-stop forces so
+        % those internal forces cancel in the whole-vehicle balance.
+        heaveStiffness    % [N/m]
+        heaveDamping      % [N*s/m]
+        pitchStiffness    % [N*m/rad]
+        pitchDamping      % [N*m*s/rad]
         rollStiffness     % [N*m/rad]  (legacy whole-car; superseded by axle model)
         rollDamping       = NaN  % [N*m*s/rad]  NaN = derive
 
@@ -52,8 +52,8 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         torsionalDamping   % [N*m*s/rad]
 
         % Reference to the suspension manager, used to read the per-axle
-        % wheel-rate roll stiffness so the chassis roll model and the
-        % load-transfer split share the same numbers. Optional.
+        % equivalent per-corner axle roll rate so the chassis roll model and
+        % the load-transfer split share the same numbers. Optional.
         suspension
 
         % Internal integration cap for the stiff vertical attitude states.
@@ -64,11 +64,6 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         % Lazily-cached run invariant: whether the linked suspension exposes
         % getAxleRollStiffness. Empty = uncached.
         cachedSuspensionHasRollStiffness
-
-        % Lazily-cached resolved platform stiffness/damping. Derived from
-        % the linked suspension on first use, or overridden by finite
-        % property values. Empty = uncached.
-        cachedDerivedPlatform
     end
 
     methods
@@ -119,18 +114,9 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             obj.cachedSuspensionHasRollStiffness = ...
                 ~isempty(suspension) && ...
                 isa(suspension, 'lts.components.Suspension.SuspensionManager');
-            % Clear the derived-platform cache so heave/pitch/roll
-            % stiffness+damping are re-derived with the linked suspension.
-            obj.cachedDerivedPlatform = [];
         end
 
         function reset(obj)
-            if isinf(obj.torsionalRigidity)
-                error('lts_components_Chassis_SimpleChassis:InfTorsionalRigidity', ...
-                    ['torsionalRigidity = Inf is numerically unstable with explicit Euler ' ...
-                    'at dt <= 1 ms. Use a large finite value (e.g. 1e6 N*m/rad) for ' ...
-                    'near-rigid torsion.']);
-            end
             obj.state.reset();
             obj.state.updateCornerKinematics( ...
                 obj.wheelbase, obj.trackWidth, obj.staticFrontWeight);
@@ -139,15 +125,11 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         function updateFromAccelerations(obj, ax, ay, aeroForces, dt, yawAccel)
             % UPDATEFROMACCELERATIONS Integrate heave, pitch, and roll
             % ax > 0 creates nose-up pitch. ay > 0 creates right-side-down roll.
-            if isinf(obj.torsionalRigidity)
-                error('lts_components_Chassis_SimpleChassis:InfTorsionalRigidity', ...
-                    ['torsionalRigidity = Inf is numerically unstable with explicit ' ...
-                    'Euler at dt <= 1 ms. Use a large finite value (e.g. 1e6 ' ...
-                    'N*m/rad) for near-rigid torsion.']);
-            end
             if nargin < 4 || isempty(aeroForces)
                 aeroForces = struct('Fz_front', 0, 'Fz_rear', 0, ...
-                    'F_drag', 0, 'dragHeight', 0);
+                    'F_drag', 0, 'dragHeight', 0, ...
+                    'dragXPosition', 0, 'F_drag_longitudinal', 0, ...
+                    'F_drag_lateral', 0);
             end
             if nargin < 6 || isempty(yawAccel)
                 yawAccel = 0;
@@ -162,26 +144,69 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
                 return;
             end
 
-            p = obj.effectivePlatform();
-
             FzFront = obj.getStructField(aeroForces, 'Fz_front', 0);
             FzRear = obj.getStructField(aeroForces, 'Fz_rear', 0);
             Fdrag = obj.getStructField(aeroForces, 'F_drag', 0);
+            % Signed component magnitudes along the body-frame velocity
+            % direction. The actual aerodynamic force is their negative.
+            % Legacy callers omit these fields and are assumed to be moving
+            % straight forward.
+            FdragLongitudinal = obj.getStructField( ...
+                aeroForces, 'F_drag_longitudinal', Fdrag);
+            FdragLateral = obj.getStructField( ...
+                aeroForces, 'F_drag_lateral', 0);
+            % Absolute drag-center height above ground and longitudinal
+            % position from CG. These reference datums are shared by all
+            % AeroComponent implementations.
             dragHeight = obj.getStructField(aeroForces, 'dragHeight', 0);
+            dragXPosition = obj.getStructField( ...
+                aeroForces, 'dragXPosition', 0);
+            currentCgHeight = obj.cgHeight - obj.state.heave;
+            if ~isfinite(currentCgHeight)
+                currentCgHeight = obj.cgHeight;
+            end
+
+            % The passed accelerations are net accelerations and already
+            % contain aerodynamic drag. Recover the non-aero acceleration
+            % before forming the ground-force load-transfer moments, then
+            % add the actual aero moment about the CG exactly once.
+            nonAeroAx = ax + FdragLongitudinal / max(obj.totalMass, eps);
+            nonAeroAy = ay + FdragLateral / max(obj.totalMass, eps);
 
             frontArm = obj.frontArm;
             rearArm = obj.rearArm;
             downforcePitchMoment = FzRear * rearArm - FzFront * frontArm;
-            dragPitchMoment = Fdrag * dragHeight;
+            dragPitchMoment = FdragLongitudinal * ...
+                (dragHeight - currentCgHeight);
             aeroPitchMoment = downforcePitchMoment + dragPitchMoment;
 
-            heaveForce = FzFront + FzRear ...
-                - p.Kheave * obj.state.heave ...
-                - p.Cheave * obj.state.heaveRate;
+            [suspensionReaction, useSuspensionReaction] = ...
+                obj.getSuspensionReactionDeltas();
+            if useSuspensionReaction
+                % Forces are expressed as increments from static equilibrium.
+                % Positive suspension force acts upward on the sprung mass,
+                % while positive chassis heave is downward.
+                heaveReaction = suspensionReaction.FL + suspensionReaction.FR + ...
+                    suspensionReaction.RL + suspensionReaction.RR;
+                heaveForce = FzFront + FzRear - heaveReaction;
 
-            pitchMoment = obj.sprungMass * ax * obj.cgHeight + aeroPitchMoment ...
-                - p.Kpitch * obj.state.pitchAngle ...
-                - p.Cpitch * obj.state.pitchRate;
+                % Positive pitch is nose-up. An increased front suspension
+                % reaction creates a nose-up moment; an increased rear
+                % reaction creates a nose-down moment.
+                pitchReaction = ...
+                    (suspensionReaction.FL + suspensionReaction.FR) * frontArm - ...
+                    (suspensionReaction.RL + suspensionReaction.RR) * rearArm;
+                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight + ...
+                    aeroPitchMoment + pitchReaction;
+            else
+                heaveForce = FzFront + FzRear ...
+                    - obj.heaveStiffness * obj.state.heave ...
+                    - obj.heaveDamping * obj.state.heaveRate;
+
+                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight + aeroPitchMoment ...
+                    - obj.pitchStiffness * obj.state.pitchAngle ...
+                    - obj.pitchDamping * obj.state.pitchRate;
+            end
 
             % --- Roll: front/rear split DOFs coupled by a torsion spring ---
             % The sprung-mass roll moment is evaluated at each axle center:
@@ -195,8 +220,8 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % load. The legacy whole-car rollAngle is kept as the average.
             massFrac = obj.staticFrontWeight;
             rearMassFrac = 1 - massFrac;
-            frontAxleAy = ay + yawAccel * obj.frontArm;
-            rearAxleAy  = ay - yawAccel * obj.rearArm;
+            frontAxleAy = nonAeroAy + yawAccel * obj.frontArm;
+            rearAxleAy  = nonAeroAy - yawAccel * obj.rearArm;
             frontSprungMass = obj.sprungMass * massFrac;
             rearSprungMass = obj.sprungMass * rearMassFrac;
             [hrcF, hrcR, rclFAt1g, rclRAt1g] = obj.getRollCenterConfig();
@@ -208,52 +233,157 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             rollMomentR = rearSprungMass * ...
                 (rearAxleAy * (obj.cgHeight - hrcR) + ...
                 lts.vehicle.VehicleManager.g * rclR);
+
+            % Direct lateral-drag roll moment about the CG. Resolve the
+            % force-weighted longitudinal CP between the front/rear roll
+            % DOFs without clamping so an outboard CP preserves its moment.
+            dragRollMoment = FdragLateral * (dragHeight - currentCgHeight);
+            dragFrontFraction = (rearArm + dragXPosition) / ...
+                max(obj.wheelbase, eps);
+            rollMomentF = rollMomentF + dragRollMoment * dragFrontFraction;
+            rollMomentR = rollMomentR + dragRollMoment * ...
+                (1 - dragFrontFraction);
             geoLatFront = frontSprungMass * frontAxleAy * hrcF / ...
                 max(obj.trackWidth, eps);
             geoLatRear = rearSprungMass * rearAxleAy * hrcR / ...
                 max(obj.trackWidth, eps);
 
-            [KrollF, KrollR] = obj.getAxleRollStiffnessRad();
-            CrollF = p.Croll * massFrac;
-            CrollR = p.Croll * rearMassFrac;
-
-            % If no per-axle stiffness is available, fall back to the legacy
-            % whole-car rollStiffness split so the model remains stable.
-            if KrollF <= 0 && KrollR <= 0
-                KrollF = obj.rollStiffness * massFrac;
-                KrollR = obj.rollStiffness * rearMassFrac;
+            % The attitude DOFs represent sprung mass only. Account for the
+            % remainder of the configured total vehicle mass directly at the
+            % contact patches, otherwise load transfer is understated by the
+            % sprung/total mass ratio when unsprung CG data is unavailable.
+            additionalMass = max(obj.totalMass - obj.sprungMass, 0);
+            additionalLongitudinalTransfer = additionalMass * nonAeroAx * ...
+                obj.cgHeight / max(obj.wheelbase, eps);
+            additionalFrontMass = additionalMass * massFrac;
+            additionalRearMass = additionalMass * rearMassFrac;
+            additionalGeoFront = additionalFrontMass * frontAxleAy * hrcF / ...
+                max(obj.trackWidth, eps);
+            additionalGeoRear = additionalRearMass * rearAxleAy * hrcR / ...
+                max(obj.trackWidth, eps);
+            additionalElasticMoment = ...
+                additionalFrontMass * (frontAxleAy * (obj.cgHeight - hrcF) + ...
+                    lts.vehicle.VehicleManager.g * rclF) + ...
+                additionalRearMass * (rearAxleAy * (obj.cgHeight - hrcR) + ...
+                    lts.vehicle.VehicleManager.g * rclR);
+            frontRollStiffnessFraction = massFrac;
+            if ~isempty(obj.suspension) && ...
+                    ismethod(obj.suspension, 'deriveFrontRollStiffnessFraction')
+                frontRollStiffnessFraction = ...
+                    obj.suspension.deriveFrontRollStiffnessFraction();
             end
+            frontRollStiffnessFraction = lts.util.clamp( ...
+                frontRollStiffnessFraction, 0, 1);
+            additionalElasticTransfer = additionalElasticMoment / ...
+                max(obj.trackWidth, eps);
+            additionalLatFront = additionalGeoFront + ...
+                additionalElasticTransfer * frontRollStiffnessFraction;
+            additionalLatRear = additionalGeoRear + ...
+                additionalElasticTransfer * (1 - frontRollStiffnessFraction);
 
             twist = obj.state.frontRollAngle - obj.state.rearRollAngle;
             Kt = obj.torsionalRigidity;
             Ct = obj.torsionalDamping;
             twistRate = obj.state.frontRollRate - obj.state.rearRollRate;
 
-            frontRollMoment = rollMomentF ...
-                - KrollF * obj.state.frontRollAngle ...
-                - CrollF * obj.state.frontRollRate ...
-                - obj.safeTorsion(Kt, twist) ...
-                - Ct * twistRate;
-            rearRollMoment = rollMomentR ...
-                - KrollR * obj.state.rearRollAngle ...
-                - CrollR * obj.state.rearRollRate ...
-                + obj.safeTorsion(Kt, twist) ...
-                + Ct * twistRate;
+            % Infinite rigidity is a holonomic equality constraint, not a
+            % numerically large penalty spring. Project any incoming mismatch
+            % to the inertia-weighted common coordinate, then integrate one
+            % shared roll DOF below.
+            rigidTorsion = isinf(Kt);
+            if rigidTorsion
+                totalRollInertia = max( ...
+                    obj.frontRollInertia + obj.rearRollInertia, eps);
+                commonRollAngle = ...
+                    (obj.frontRollInertia * obj.state.frontRollAngle + ...
+                    obj.rearRollInertia * obj.state.rearRollAngle) / ...
+                    totalRollInertia;
+                commonRollRate = ...
+                    (obj.frontRollInertia * obj.state.frontRollRate + ...
+                    obj.rearRollInertia * obj.state.rearRollRate) / ...
+                    totalRollInertia;
+                obj.state.frontRollAngle = commonRollAngle;
+                obj.state.rearRollAngle = commonRollAngle;
+                obj.state.frontRollRate = commonRollRate;
+                obj.state.rearRollRate = commonRollRate;
+                twist = 0;
+                twistRate = 0;
+            end
+
+            if useSuspensionReaction
+                halfTrack = obj.trackWidth / 2;
+                % Positive roll is right-side-down. Upward suspension force
+                % on the right therefore supplies a negative/restoring
+                % moment. Suspension damping and dynamically engaged bump
+                % stops are already present in these reaction forces.
+                frontSuspensionMoment = ...
+                    (suspensionReaction.FL - suspensionReaction.FR) * halfTrack;
+                rearSuspensionMoment = ...
+                    (suspensionReaction.RL - suspensionReaction.RR) * halfTrack;
+                frontRollMoment = rollMomentF + frontSuspensionMoment;
+                rearRollMoment = rollMomentR + rearSuspensionMoment;
+            else
+                [KrollF, KrollR] = obj.getAxleRollStiffnessRad();
+                CrollF = obj.rollDamping * massFrac;
+                CrollR = obj.rollDamping * rearMassFrac;
+
+                % If no per-axle stiffness is available, fall back to the
+                % legacy whole-car rollStiffness split.
+                if KrollF <= 0 && KrollR <= 0
+                    KrollF = obj.rollStiffness * massFrac;
+                    KrollR = obj.rollStiffness * rearMassFrac;
+                end
+                frontRollMoment = rollMomentF ...
+                    - KrollF * obj.state.frontRollAngle ...
+                    - CrollF * obj.state.frontRollRate;
+                rearRollMoment = rollMomentR ...
+                    - KrollR * obj.state.rearRollAngle ...
+                    - CrollR * obj.state.rearRollRate;
+            end
+
+            if ~rigidTorsion
+                torsionMoment = obj.safeTorsion(Kt, twist) + Ct * twistRate;
+                frontRollMoment = frontRollMoment - torsionMoment;
+                rearRollMoment = rearRollMoment + torsionMoment;
+            end
 
             obj.state.heaveAccel = heaveForce / max(obj.sprungMass, eps);
             obj.state.pitchAccel = pitchMoment / max(obj.pitchInertia, eps);
-            obj.state.frontRollAccel = frontRollMoment / max(obj.frontRollInertia, eps);
-            obj.state.rearRollAccel  = rearRollMoment  / max(obj.rearRollInertia,  eps);
+            if rigidTorsion
+                commonRollAccel = (frontRollMoment + rearRollMoment) / ...
+                    totalRollInertia;
+                obj.state.frontRollAccel = commonRollAccel;
+                obj.state.rearRollAccel = commonRollAccel;
+            else
+                obj.state.frontRollAccel = frontRollMoment / ...
+                    max(obj.frontRollInertia, eps);
+                obj.state.rearRollAccel = rearRollMoment / ...
+                    max(obj.rearRollInertia, eps);
+            end
 
             obj.state.heaveRate = obj.state.heaveRate + obj.state.heaveAccel * dt;
             obj.state.pitchRate = obj.state.pitchRate + obj.state.pitchAccel * dt;
-            obj.state.frontRollRate = obj.state.frontRollRate + obj.state.frontRollAccel * dt;
-            obj.state.rearRollRate  = obj.state.rearRollRate  + obj.state.rearRollAccel  * dt;
 
             obj.state.heave = obj.state.heave + obj.state.heaveRate * dt;
             obj.state.pitchAngle = obj.state.pitchAngle + obj.state.pitchRate * dt;
-            obj.state.frontRollAngle = obj.state.frontRollAngle + obj.state.frontRollRate * dt;
-            obj.state.rearRollAngle  = obj.state.rearRollAngle  + obj.state.rearRollRate  * dt;
+            if rigidTorsion
+                commonRollRate = obj.state.frontRollRate + ...
+                    obj.state.frontRollAccel * dt;
+                commonRollAngle = obj.state.frontRollAngle + commonRollRate * dt;
+                obj.state.frontRollRate = commonRollRate;
+                obj.state.rearRollRate = commonRollRate;
+                obj.state.frontRollAngle = commonRollAngle;
+                obj.state.rearRollAngle = commonRollAngle;
+            else
+                obj.state.frontRollRate = obj.state.frontRollRate + ...
+                    obj.state.frontRollAccel * dt;
+                obj.state.rearRollRate = obj.state.rearRollRate + ...
+                    obj.state.rearRollAccel * dt;
+                obj.state.frontRollAngle = obj.state.frontRollAngle + ...
+                    obj.state.frontRollRate * dt;
+                obj.state.rearRollAngle = obj.state.rearRollAngle + ...
+                    obj.state.rearRollRate * dt;
+            end
 
             % Legacy whole-car roll state = average of the two axle DOFs.
             obj.state.rollAngle = 0.5 * (obj.state.frontRollAngle + obj.state.rearRollAngle);
@@ -261,10 +391,15 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             obj.state.rollAccel = 0.5 * (obj.state.frontRollAccel + obj.state.rearRollAccel);
 
             obj.state.longitudinalLoadTransfer = ...
-                obj.totalMass * ax * obj.cgHeight / max(obj.wheelbase, eps);
+                (obj.totalMass * nonAeroAx * obj.cgHeight + ...
+                dragPitchMoment) / max(obj.wheelbase, eps);
             obj.state.lateralLoadTransfer = ...
                 (rollMomentF + rollMomentR) / max(obj.trackWidth, eps) + ...
-                geoLatFront + geoLatRear;
+                geoLatFront + geoLatRear + additionalLatFront + additionalLatRear;
+            obj.state.additionalLongitudinalLoadTransfer = ...
+                additionalLongitudinalTransfer;
+            obj.state.frontAdditionalLateralLoadTransfer = additionalLatFront;
+            obj.state.rearAdditionalLateralLoadTransfer = additionalLatRear;
             obj.state.frontGeometricLateralLoadTransfer = geoLatFront;
             obj.state.rearGeometricLateralLoadTransfer = geoLatRear;
             obj.state.frontRollCenterLateral = rclF;
@@ -333,6 +468,34 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
     end
 
     methods (Access = private)
+        function [reaction, available] = getSuspensionReactionDeltas(obj)
+            % GETSUSPENSIONREACTIONDELTAS Corner reactions above static load.
+            % The SuspensionState forces act upward on the sprung chassis;
+            % subtracting staticLoad keeps the chassis coordinates referenced
+            % to their zero-force static equilibrium.
+            reaction = struct('FL', 0, 'FR', 0, 'RL', 0, 'RR', 0);
+            available = ~isempty(obj.suspension) && ...
+                isa(obj.suspension, 'lts.components.Suspension.SuspensionManager');
+            if ~available
+                return;
+            end
+
+            reaction.FL = obj.suspension.frontLeft.state.suspensionForce - ...
+                obj.suspension.frontLeft.state.staticLoad;
+            reaction.FR = obj.suspension.frontRight.state.suspensionForce - ...
+                obj.suspension.frontRight.state.staticLoad;
+            reaction.RL = obj.suspension.rearLeft.state.suspensionForce - ...
+                obj.suspension.rearLeft.state.staticLoad;
+            reaction.RR = obj.suspension.rearRight.state.suspensionForce - ...
+                obj.suspension.rearRight.state.staticLoad;
+
+            values = [reaction.FL, reaction.FR, reaction.RL, reaction.RR];
+            if any(~isfinite(values))
+                reaction = struct('FL', 0, 'FR', 0, 'RL', 0, 'RR', 0);
+                available = false;
+            end
+        end
+
         function [hrcF, hrcR, rclF, rclR] = getRollCenterConfig(obj)
             hrcF = 0;
             hrcR = 0;
@@ -358,9 +521,9 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
 
         function [KrollF, KrollR] = getAxleRollStiffnessRad(obj)
             % GETAXLEROLLSTIFFNESSRAD Per-axle roll stiffness [N*m/rad].
-            % Reads the per-axle wheel-rate roll stiffness (springs + ARB)
-            % from the linked suspension manager and converts to a roll
-            % rate about the roll axis: K_roll = Kw * (t/2)^2 * 2 = Kw*t^2/2.
+            % Reads the equivalent per-corner axle rate (mean spring tangent
+            % rate + twice the ARB differential coupling rate) and converts
+            % it to roll rate: K_roll = Kw*(t/2)^2*2 = Kw*t^2/2.
             % Returns 0,0 when no suspension is linked.
             KrollF = 0;
             KrollR = 0;
@@ -377,14 +540,9 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         end
 
         function torque = safeTorsion(~, Kt, twist)
-            % SAFETORSION Torsion-spring torque.
-            % Inf torsionalRigidity is rejected in reset(), but a defensive
-            % guard is kept here for robustness.
-            if isinf(Kt)
-                torque = 1e9 * twist;
-            else
-                torque = Kt * twist;
-            end
+            % SAFETORSION Finite torsion-spring torque. Infinite stiffness is
+            % handled as an exact constrained coordinate in the caller.
+            torque = Kt * twist;
         end
 
         function n = integrationSubsteps(obj, dt)
@@ -394,111 +552,6 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             else
                 n = max(1, ceil(dt / maxStep));
             end
-        end
-
-        %% ---- Platform parameter derivation ----
-
-        function p = effectivePlatform(obj)
-            % EFFECTIVEPLATFORM Resolve heave/pitch/roll stiffness + damping.
-            % NaN properties are derived from the linked suspension's
-            % spring/damper rates; finite values are used directly as
-            % overrides. Memoized (run invariant).
-            if ~isempty(obj.cachedDerivedPlatform)
-                p = obj.cachedDerivedPlatform;
-                return;
-            end
-            p = struct();
-            if isnan(obj.heaveStiffness)
-                p.Kheave = obj.deriveHeaveStiffness();
-            else
-                p.Kheave = obj.heaveStiffness;
-            end
-            if isnan(obj.heaveDamping)
-                p.Cheave = obj.deriveHeaveDamping();
-            else
-                p.Cheave = obj.heaveDamping;
-            end
-            if isnan(obj.pitchStiffness)
-                p.Kpitch = obj.derivePitchStiffness();
-            else
-                p.Kpitch = obj.pitchStiffness;
-            end
-            if isnan(obj.pitchDamping)
-                p.Cpitch = obj.derivePitchDamping();
-            else
-                p.Cpitch = obj.pitchDamping;
-            end
-            if isnan(obj.rollDamping)
-                p.Croll = obj.deriveRollDamping();
-            else
-                p.Croll = obj.rollDamping;
-            end
-            obj.cachedDerivedPlatform = p;
-        end
-
-        function has = hasLinkedSuspension(obj)
-            has = ~isempty(obj.suspension) && ...
-                isa(obj.suspension, 'lts.components.Suspension.SuspensionManager');
-        end
-
-        function mr = cornerMotionRatio(~, cornerUnit)
-            mr = cornerUnit.motionRatio;
-            if cornerUnit.state.motionRatioEffective > 0
-                mr = cornerUnit.state.motionRatioEffective;
-            end
-            mr = max(mr, eps);
-        end
-
-        function K = deriveHeaveStiffness(obj)
-            % 4 corners: 2*(Kf*MRf^2 + Kr*MRr^2)
-            if ~obj.hasLinkedSuspension(); K = 0; return; end
-            susp = obj.suspension;
-            mrF = obj.cornerMotionRatio(susp.frontLeft);
-            mrR = obj.cornerMotionRatio(susp.rearLeft);
-            K = 2 * (susp.frontLeft.springRate * mrF^2 + ...
-                     susp.rearLeft.springRate * mrR^2);
-        end
-
-        function C = deriveHeaveDamping(obj)
-            % 4 corners, compression damping
-            if ~obj.hasLinkedSuspension(); C = 0; return; end
-            susp = obj.suspension;
-            mrF = obj.cornerMotionRatio(susp.frontLeft);
-            mrR = obj.cornerMotionRatio(susp.rearLeft);
-            C = 2 * (susp.frontLeft.dampingCoeff * mrF^2 + ...
-                     susp.rearLeft.dampingCoeff * mrR^2);
-        end
-
-        function K = derivePitchStiffness(obj)
-            % Kf*MRf^2*frontArm^2 + Kr*MRr^2*rearArm^2
-            if ~obj.hasLinkedSuspension(); K = 0; return; end
-            susp = obj.suspension;
-            mrF = obj.cornerMotionRatio(susp.frontLeft);
-            mrR = obj.cornerMotionRatio(susp.rearLeft);
-            K = susp.frontLeft.springRate * mrF^2 * obj.frontArm^2 + ...
-                susp.rearLeft.springRate * mrR^2 * obj.rearArm^2;
-        end
-
-        function C = derivePitchDamping(obj)
-            if ~obj.hasLinkedSuspension(); C = 0; return; end
-            susp = obj.suspension;
-            mrF = obj.cornerMotionRatio(susp.frontLeft);
-            mrR = obj.cornerMotionRatio(susp.rearLeft);
-            C = susp.frontLeft.dampingCoeff * mrF^2 * obj.frontArm^2 + ...
-                susp.rearLeft.dampingCoeff * mrR^2 * obj.rearArm^2;
-        end
-
-        function C = deriveRollDamping(obj)
-            % (Cf*MRf^2 + Cr*MRr^2) * trackWidth^2 / 2
-            % Mirrors the wheel-rate → roll-rate conversion in
-            % getAxleRollStiffnessRad, applied to damper rates.
-            if ~obj.hasLinkedSuspension(); C = 0; return; end
-            susp = obj.suspension;
-            mrF = obj.cornerMotionRatio(susp.frontLeft);
-            mrR = obj.cornerMotionRatio(susp.rearLeft);
-            C = (susp.frontLeft.dampingCoeff * mrF^2 + ...
-                 susp.rearLeft.dampingCoeff * mrR^2) * ...
-                obj.trackWidth^2 / 2;
         end
     end
 
