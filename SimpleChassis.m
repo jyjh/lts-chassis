@@ -32,18 +32,21 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         rearArm
 
         % Linear platform stiffness/damping from static equilibrium.
-        % No defaults: set by lts.vehicle.VehicleManager.fromConfig from lts.vehicle.VehicleConfig.
-        heaveStiffness    % [N/m]
-        heaveDamping      % [N*s/m]
-        pitchStiffness    % [N*m/rad]
-        pitchDamping      % [N*m*s/rad]
+        % NaN = derive from the linked suspension's spring/damper rates (the
+        % default); a finite value overrides the derivation. Set by
+        % lts.vehicle.VehicleManager.fromConfig from lts.vehicle.VehicleConfig.
+        heaveStiffness    = NaN  % [N/m]  NaN = derive from suspension
+        heaveDamping      = NaN  % [N*s/m]  NaN = derive
+        pitchStiffness    = NaN  % [N*m/rad]  NaN = derive
+        pitchDamping      = NaN  % [N*m*s/rad]  NaN = derive
         rollStiffness     % [N*m/rad]  (legacy whole-car; superseded by axle model)
-        rollDamping       % [N*m*s/rad]
+        rollDamping       = NaN  % [N*m*s/rad]  NaN = derive
 
         % Chassis torsional rigidity [N*m/rad]. Couples the front and rear
         % roll DOFs via a torsion spring on (frontRollAngle - rearRollAngle).
-        % Inf = perfectly rigid torsionally (front and rear roll together);
-        % a finite value lets the body twist under asymmetric load.
+        % A finite value lets the body twist under asymmetric load. Inf is
+        % rejected (numerically unstable with explicit Euler at dt <= 1 ms);
+        % use a large finite value (e.g. 1e6 N*m/rad) for near-rigid torsion.
         % Set by lts.vehicle.VehicleManager.fromConfig (e.g. 4000 N*m/deg ~ 229000 N*m/rad).
         torsionalRigidity  % [N*m/rad]
         torsionalDamping   % [N*m*s/rad]
@@ -61,6 +64,11 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         % Lazily-cached run invariant: whether the linked suspension exposes
         % getAxleRollStiffness. Empty = uncached.
         cachedSuspensionHasRollStiffness
+
+        % Lazily-cached resolved platform stiffness/damping. Derived from
+        % the linked suspension on first use, or overridden by finite
+        % property values. Empty = uncached.
+        cachedDerivedPlatform
     end
 
     methods
@@ -111,9 +119,18 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             obj.cachedSuspensionHasRollStiffness = ...
                 ~isempty(suspension) && ...
                 isa(suspension, 'lts.components.Suspension.SuspensionManager');
+            % Clear the derived-platform cache so heave/pitch/roll
+            % stiffness+damping are re-derived with the linked suspension.
+            obj.cachedDerivedPlatform = [];
         end
 
         function reset(obj)
+            if isinf(obj.torsionalRigidity)
+                error('lts_components_Chassis_SimpleChassis:InfTorsionalRigidity', ...
+                    ['torsionalRigidity = Inf is numerically unstable with explicit Euler ' ...
+                    'at dt <= 1 ms. Use a large finite value (e.g. 1e6 N*m/rad) for ' ...
+                    'near-rigid torsion.']);
+            end
             obj.state.reset();
             obj.state.updateCornerKinematics( ...
                 obj.wheelbase, obj.trackWidth, obj.staticFrontWeight);
@@ -122,6 +139,12 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         function updateFromAccelerations(obj, ax, ay, aeroForces, dt, yawAccel)
             % UPDATEFROMACCELERATIONS Integrate heave, pitch, and roll
             % ax > 0 creates nose-up pitch. ay > 0 creates right-side-down roll.
+            if isinf(obj.torsionalRigidity)
+                error('lts_components_Chassis_SimpleChassis:InfTorsionalRigidity', ...
+                    ['torsionalRigidity = Inf is numerically unstable with explicit ' ...
+                    'Euler at dt <= 1 ms. Use a large finite value (e.g. 1e6 ' ...
+                    'N*m/rad) for near-rigid torsion.']);
+            end
             if nargin < 4 || isempty(aeroForces)
                 aeroForces = struct('Fz_front', 0, 'Fz_rear', 0, ...
                     'F_drag', 0, 'dragHeight', 0);
@@ -139,6 +162,8 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
                 return;
             end
 
+            p = obj.effectivePlatform();
+
             FzFront = obj.getStructField(aeroForces, 'Fz_front', 0);
             FzRear = obj.getStructField(aeroForces, 'Fz_rear', 0);
             Fdrag = obj.getStructField(aeroForces, 'F_drag', 0);
@@ -151,12 +176,12 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             aeroPitchMoment = downforcePitchMoment + dragPitchMoment;
 
             heaveForce = FzFront + FzRear ...
-                - obj.heaveStiffness * obj.state.heave ...
-                - obj.heaveDamping * obj.state.heaveRate;
+                - p.Kheave * obj.state.heave ...
+                - p.Cheave * obj.state.heaveRate;
 
             pitchMoment = obj.sprungMass * ax * obj.cgHeight + aeroPitchMoment ...
-                - obj.pitchStiffness * obj.state.pitchAngle ...
-                - obj.pitchDamping * obj.state.pitchRate;
+                - p.Kpitch * obj.state.pitchAngle ...
+                - p.Cpitch * obj.state.pitchRate;
 
             % --- Roll: front/rear split DOFs coupled by a torsion spring ---
             % The sprung-mass roll moment is evaluated at each axle center:
@@ -164,9 +189,9 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % Each axle is resisted by its own roll stiffness (wheel springs
             % + ARB, read from the suspension so the chassis and load-transfer
             % models agree) and coupled to the other axle by the chassis
-            % torsion spring on the twist angle (frontRollAngle - rearRollAngle). With
-            % torsionalRigidity = Inf the two ends roll together (perfectly
-            % rigid tub); a finite value lets the body twist under asymmetric
+            % torsion spring on the twist angle (frontRollAngle - rearRollAngle).
+            % A large finite torsionalRigidity makes the two ends roll nearly
+            % together; a smaller value lets the body twist under asymmetric
             % load. The legacy whole-car rollAngle is kept as the average.
             massFrac = obj.staticFrontWeight;
             rearMassFrac = 1 - massFrac;
@@ -189,8 +214,8 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
                 max(obj.trackWidth, eps);
 
             [KrollF, KrollR] = obj.getAxleRollStiffnessRad();
-            CrollF = obj.rollDamping * massFrac;
-            CrollR = obj.rollDamping * rearMassFrac;
+            CrollF = p.Croll * massFrac;
+            CrollR = p.Croll * rearMassFrac;
 
             % If no per-axle stiffness is available, fall back to the legacy
             % whole-car rollStiffness split so the model remains stable.
@@ -352,10 +377,9 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         end
 
         function torque = safeTorsion(~, Kt, twist)
-            % SAFETORSION Torsion-spring torque, robust to Kt = Inf.
-            % With infinite rigidity the front/rear DOFs should lock together;
-            % an Inf*0 product would yield NaN, so a very large finite cap is
-            % used instead, which numerically enforces near-equal roll angles.
+            % SAFETORSION Torsion-spring torque.
+            % Inf torsionalRigidity is rejected in reset(), but a defensive
+            % guard is kept here for robustness.
             if isinf(Kt)
                 torque = 1e9 * twist;
             else
@@ -370,6 +394,111 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             else
                 n = max(1, ceil(dt / maxStep));
             end
+        end
+
+        %% ---- Platform parameter derivation ----
+
+        function p = effectivePlatform(obj)
+            % EFFECTIVEPLATFORM Resolve heave/pitch/roll stiffness + damping.
+            % NaN properties are derived from the linked suspension's
+            % spring/damper rates; finite values are used directly as
+            % overrides. Memoized (run invariant).
+            if ~isempty(obj.cachedDerivedPlatform)
+                p = obj.cachedDerivedPlatform;
+                return;
+            end
+            p = struct();
+            if isnan(obj.heaveStiffness)
+                p.Kheave = obj.deriveHeaveStiffness();
+            else
+                p.Kheave = obj.heaveStiffness;
+            end
+            if isnan(obj.heaveDamping)
+                p.Cheave = obj.deriveHeaveDamping();
+            else
+                p.Cheave = obj.heaveDamping;
+            end
+            if isnan(obj.pitchStiffness)
+                p.Kpitch = obj.derivePitchStiffness();
+            else
+                p.Kpitch = obj.pitchStiffness;
+            end
+            if isnan(obj.pitchDamping)
+                p.Cpitch = obj.derivePitchDamping();
+            else
+                p.Cpitch = obj.pitchDamping;
+            end
+            if isnan(obj.rollDamping)
+                p.Croll = obj.deriveRollDamping();
+            else
+                p.Croll = obj.rollDamping;
+            end
+            obj.cachedDerivedPlatform = p;
+        end
+
+        function has = hasLinkedSuspension(obj)
+            has = ~isempty(obj.suspension) && ...
+                isa(obj.suspension, 'lts.components.Suspension.SuspensionManager');
+        end
+
+        function mr = cornerMotionRatio(~, cornerUnit)
+            mr = cornerUnit.motionRatio;
+            if cornerUnit.state.motionRatioEffective > 0
+                mr = cornerUnit.state.motionRatioEffective;
+            end
+            mr = max(mr, eps);
+        end
+
+        function K = deriveHeaveStiffness(obj)
+            % 4 corners: 2*(Kf*MRf^2 + Kr*MRr^2)
+            if ~obj.hasLinkedSuspension(); K = 0; return; end
+            susp = obj.suspension;
+            mrF = obj.cornerMotionRatio(susp.frontLeft);
+            mrR = obj.cornerMotionRatio(susp.rearLeft);
+            K = 2 * (susp.frontLeft.springRate * mrF^2 + ...
+                     susp.rearLeft.springRate * mrR^2);
+        end
+
+        function C = deriveHeaveDamping(obj)
+            % 4 corners, compression damping
+            if ~obj.hasLinkedSuspension(); C = 0; return; end
+            susp = obj.suspension;
+            mrF = obj.cornerMotionRatio(susp.frontLeft);
+            mrR = obj.cornerMotionRatio(susp.rearLeft);
+            C = 2 * (susp.frontLeft.dampingCoeff * mrF^2 + ...
+                     susp.rearLeft.dampingCoeff * mrR^2);
+        end
+
+        function K = derivePitchStiffness(obj)
+            % Kf*MRf^2*frontArm^2 + Kr*MRr^2*rearArm^2
+            if ~obj.hasLinkedSuspension(); K = 0; return; end
+            susp = obj.suspension;
+            mrF = obj.cornerMotionRatio(susp.frontLeft);
+            mrR = obj.cornerMotionRatio(susp.rearLeft);
+            K = susp.frontLeft.springRate * mrF^2 * obj.frontArm^2 + ...
+                susp.rearLeft.springRate * mrR^2 * obj.rearArm^2;
+        end
+
+        function C = derivePitchDamping(obj)
+            if ~obj.hasLinkedSuspension(); C = 0; return; end
+            susp = obj.suspension;
+            mrF = obj.cornerMotionRatio(susp.frontLeft);
+            mrR = obj.cornerMotionRatio(susp.rearLeft);
+            C = susp.frontLeft.dampingCoeff * mrF^2 * obj.frontArm^2 + ...
+                susp.rearLeft.dampingCoeff * mrR^2 * obj.rearArm^2;
+        end
+
+        function C = deriveRollDamping(obj)
+            % (Cf*MRf^2 + Cr*MRr^2) * trackWidth^2 / 2
+            % Mirrors the wheel-rate → roll-rate conversion in
+            % getAxleRollStiffnessRad, applied to damper rates.
+            if ~obj.hasLinkedSuspension(); C = 0; return; end
+            susp = obj.suspension;
+            mrF = obj.cornerMotionRatio(susp.frontLeft);
+            mrR = obj.cornerMotionRatio(susp.rearLeft);
+            C = (susp.frontLeft.dampingCoeff * mrF^2 + ...
+                 susp.rearLeft.dampingCoeff * mrR^2) * ...
+                obj.trackWidth^2 / 2;
         end
     end
 
