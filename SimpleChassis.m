@@ -68,25 +68,61 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
     methods
         function obj = SimpleChassis(vehicleManager, sprungMass, pitchInertia, rollInertia)
             % SIMPLECHASSIS Construct from lts.vehicle.VehicleManager geometry
-            %   SimpleChassis(vehicleManager)
             %   SimpleChassis(vehicleManager, sprungMass, pitchInertia, rollInertia)
-            if nargin >= 1 && ~isempty(vehicleManager)
-                obj.totalMass = vehicleManager.totalMass;
-                obj.sprungMass = vehicleManager.totalMass;
-                obj.wheelbase = vehicleManager.wheelbase;
-                obj.trackWidth = vehicleManager.trackWidth;
-                obj.cgHeight = vehicleManager.cgHeight;
-                obj.staticFrontWeight = vehicleManager.staticFrontWeight;
+            %
+            % sprungMass is intentionally required. VehicleManager.totalMass
+            % includes the four unsprung corner masses and is therefore not a
+            % physically safe default for the body-attitude inertial terms.
+            if nargin < 1 || isempty(vehicleManager)
+                error('lts_chassis_SimpleChassis:MissingVehicleManager', ...
+                    'SimpleChassis requires a nonempty VehicleManager.');
             end
-            if nargin >= 2 && ~isempty(sprungMass)
-                obj.sprungMass = sprungMass;
+            if nargin < 2 || isempty(sprungMass)
+                error('lts_chassis_SimpleChassis:MissingSprungMass', ...
+                    ['SimpleChassis requires sprungMass explicitly; ' ...
+                    'VehicleManager.totalMass includes unsprung mass.']);
             end
+            obj.validatePositiveScalar(vehicleManager.totalMass, 'totalMass');
+            obj.validatePositiveScalar(vehicleManager.wheelbase, 'wheelbase');
+            obj.validatePositiveScalar(vehicleManager.trackWidth, 'trackWidth');
+            if ~isnumeric(vehicleManager.cgHeight) || ...
+                    ~isreal(vehicleManager.cgHeight) || ...
+                    ~isscalar(vehicleManager.cgHeight) || ...
+                    ~isfinite(vehicleManager.cgHeight) || ...
+                    vehicleManager.cgHeight < 0
+                error('lts_chassis_SimpleChassis:InvalidScalar', ...
+                    'cgHeight must be a finite nonnegative real scalar.');
+            end
+            if ~isnumeric(vehicleManager.staticFrontWeight) || ...
+                    ~isreal(vehicleManager.staticFrontWeight) || ...
+                    ~isscalar(vehicleManager.staticFrontWeight) || ...
+                    ~isfinite(vehicleManager.staticFrontWeight) || ...
+                    vehicleManager.staticFrontWeight < 0 || ...
+                    vehicleManager.staticFrontWeight > 1
+                error('lts_chassis_SimpleChassis:InvalidScalar', ...
+                    'staticFrontWeight must be a finite real scalar in [0, 1].');
+            end
+            obj.validatePositiveScalar(sprungMass, 'sprungMass');
+            if sprungMass > vehicleManager.totalMass
+                error('lts_chassis_SimpleChassis:InvalidSprungMass', ...
+                    'sprungMass (%g kg) cannot exceed totalMass (%g kg).', ...
+                    sprungMass, vehicleManager.totalMass);
+            end
+
+            obj.totalMass = vehicleManager.totalMass;
+            obj.sprungMass = sprungMass;
+            obj.wheelbase = vehicleManager.wheelbase;
+            obj.trackWidth = vehicleManager.trackWidth;
+            obj.cgHeight = vehicleManager.cgHeight;
+            obj.staticFrontWeight = vehicleManager.staticFrontWeight;
             if nargin >= 3 && ~isempty(pitchInertia)
+                obj.validatePositiveScalar(pitchInertia, 'pitchInertia');
                 obj.pitchInertia = pitchInertia;
             else
                 obj.pitchInertia = max(1, obj.sprungMass * obj.wheelbase^2 / 12);
             end
             if nargin >= 4 && ~isempty(rollInertia)
+                obj.validatePositiveScalar(rollInertia, 'rollInertia');
                 obj.rollInertia = rollInertia;
             else
                 obj.rollInertia = max(1, obj.sprungMass * obj.trackWidth^2 / 12);
@@ -102,6 +138,18 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             obj.state = lts.components.Chassis.ChassisState();
             obj.state.updateCornerKinematics( ...
                 obj.wheelbase, obj.trackWidth, obj.staticFrontWeight);
+        end
+
+        function obj = set.torsionalRigidity(obj, value)
+            % Accept +Inf as the exact rigid constraint handled by the roll
+            % integrator, but reject NaN, -Inf, negative, or nonscalar input.
+            if ~isnumeric(value) || ~isreal(value) || ~isscalar(value) || ...
+                    isnan(value) || value < 0 || value == -Inf
+                error('lts_chassis_SimpleChassis:InvalidTorsionalRigidity', ...
+                    ['torsionalRigidity must be a nonnegative real scalar ' ...
+                    'or +Inf (got %s).'], mat2str(value));
+            end
+            obj.torsionalRigidity = value;
         end
 
         function obj = setSuspension(obj, suspension)
@@ -555,6 +603,15 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
     end
 
     methods (Static, Access = private)
+        function validatePositiveScalar(value, name)
+            if ~isnumeric(value) || ~isreal(value) || ~isscalar(value) || ...
+                    ~isfinite(value) || value <= 0
+                error('lts_chassis_SimpleChassis:InvalidScalar', ...
+                    '%s must be a finite positive real scalar (got %s).', ...
+                    name, mat2str(value));
+            end
+        end
+
         function value = getStructField(s, fieldName, defaultValue)
             if isstruct(s) && isfield(s, fieldName)
                 value = s.(fieldName);
