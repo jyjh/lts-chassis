@@ -59,7 +59,7 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         maxIntegrationStep = 0.001
     end
 
-    properties (Transient = true) %#ok<MCNPC>
+    properties (Transient = true)
         % Lazily-cached run invariant: whether the linked suspension exposes
         % getAxleRollStiffness. Empty = uncached.
         cachedSuspensionHasRollStiffness
