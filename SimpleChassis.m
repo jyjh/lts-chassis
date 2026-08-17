@@ -31,6 +31,14 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         frontArm
         rearArm
 
+        % Hub height [m] (approximated by the tire rolling radius = wheel
+        % center height). The unsprung-mass share of longitudinal load
+        % transfer acts at the hubs, not the sprung CG; using cgHeight for
+        % it overstates transfer by the unsprung fraction times
+        % (cgHeight - hubHeight)/cgHeight. Falls back to cgHeight (legacy
+        % behavior) when no tire is wired at construction.
+        hubHeight
+
         % Linear platform stiffness/damping fallback used when no physical
         % suspension is linked. With a linked SuspensionManager, the chassis
         % reacts against the actual corner spring/damper/bump-stop forces so
@@ -135,6 +143,16 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             obj.frontArm = obj.wheelbase * (1 - obj.staticFrontWeight);
             obj.rearArm  = obj.wheelbase * obj.staticFrontWeight;
 
+            % Hub height from the tire rolling radius when wired; else
+            % legacy cgHeight fallback.
+            obj.hubHeight = obj.cgHeight;
+            if ~isempty(vehicleManager.tire) && ...
+                    isprop(vehicleManager.tire, 'FL') && ...
+                    isfinite(vehicleManager.tire.FL.wheelRadius) && ...
+                    vehicleManager.tire.FL.wheelRadius > 0
+                obj.hubHeight = vehicleManager.tire.FL.wheelRadius;
+            end
+
             obj.state = lts.components.Chassis.ChassisState();
             obj.state.updateCornerKinematics( ...
                 obj.wheelbase, obj.trackWidth, obj.staticFrontWeight);
@@ -229,6 +247,21 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
 
             [suspensionReaction, useSuspensionReaction] = ...
                 obj.getSuspensionReactionDeltas();
+            % Anti-geometry: the fraction of the sprung longitudinal
+            % transfer reacted through the suspension links instead of the
+            % springs. Under acceleration the rear links react the drive
+            % torque (anti-squat); under braking the front links react the
+            % brake torque (anti-dive). The link-path share bypasses the
+            % pitch DOF and is applied directly to the tire loads below,
+            % conserving the total m*ax*h/L transfer. 0 = legacy spring-only
+            % path (all transfer pitches the body).
+            axAnti = 0;
+            if nonAeroAx > 0
+                axAnti = obj.antiSquatFraction();
+            elseif nonAeroAx < 0
+                axAnti = obj.antiDiveFraction();
+            end
+            axAnti = min(max(axAnti, 0), 1);
             if useSuspensionReaction
                 % Forces are expressed as increments from static equilibrium.
                 % Positive suspension force acts upward on the sprung mass,
@@ -243,14 +276,15 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
                 pitchReaction = ...
                     (suspensionReaction.FL + suspensionReaction.FR) * frontArm - ...
                     (suspensionReaction.RL + suspensionReaction.RR) * rearArm;
-                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight + ...
-                    aeroPitchMoment + pitchReaction;
+                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight * ...
+                    (1 - axAnti) + aeroPitchMoment + pitchReaction;
             else
                 heaveForce = FzFront + FzRear ...
                     - obj.heaveStiffness * obj.state.heave ...
                     - obj.heaveDamping * obj.state.heaveRate;
 
-                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight + aeroPitchMoment ...
+                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight * ...
+                    (1 - axAnti) + aeroPitchMoment ...
                     - obj.pitchStiffness * obj.state.pitchAngle ...
                     - obj.pitchDamping * obj.state.pitchRate;
             end
@@ -296,11 +330,15 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
                 max(obj.trackWidth, eps);
 
             % The attitude DOFs represent sprung mass only. Account for the
-            % remainder of the configured total vehicle mass directly at the
-            % contact patches, otherwise load transfer is understated by the
-            % sprung/total mass ratio when unsprung CG data is unavailable.
+            % remainder of the configured total vehicle mass directly at
+            % the contact patches (acting at hub height), otherwise load
+            % transfer is understated by the sprung/total mass ratio when
+            % unsprung CG data is unavailable. The anti-geometry link-path
+            % share of the sprung transfer joins it there.
             additionalMass = max(obj.totalMass - obj.sprungMass, 0);
             additionalLongitudinalTransfer = additionalMass * nonAeroAx * ...
+                obj.hubHeight / max(obj.wheelbase, eps) + ...
+                axAnti * obj.sprungMass * nonAeroAx * ...
                 obj.cgHeight / max(obj.wheelbase, eps);
             additionalFrontMass = additionalMass * massFrac;
             additionalRearMass = additionalMass * rearMassFrac;
@@ -557,6 +595,32 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             hrcR = obj.suspension.rearRollCenterHeight;
             rclF = obj.suspension.frontRollCenterLateral;
             rclR = obj.suspension.rearRollCenterLateral;
+        end
+
+        function fraction = antiDiveFraction(obj)
+            % Fraction of the sprung longitudinal transfer carried by the
+            % FRONT suspension links under braking (anti-dive) [0-1].
+            fraction = 0;
+            if ~isempty(obj.suspension) && ...
+                    isa(obj.suspension, 'lts.components.Suspension.SuspensionManager')
+                fraction = obj.suspension.frontAntiDiveFraction;
+            end
+            if ~isfinite(fraction)
+                fraction = 0;
+            end
+        end
+
+        function fraction = antiSquatFraction(obj)
+            % Fraction of the sprung longitudinal transfer carried by the
+            % REAR suspension links under acceleration (anti-squat) [0-1].
+            fraction = 0;
+            if ~isempty(obj.suspension) && ...
+                    isa(obj.suspension, 'lts.components.Suspension.SuspensionManager')
+                fraction = obj.suspension.rearAntiSquatFraction;
+            end
+            if ~isfinite(fraction)
+                fraction = 0;
+            end
         end
 
         function value = scaledRollCenterLateral(~, lateralAt1g, axleAy)
