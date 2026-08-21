@@ -31,6 +31,14 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         frontArm
         rearArm
 
+        % Hub height [m] (approximated by the tire rolling radius = wheel
+        % center height). The unsprung-mass share of longitudinal load
+        % transfer acts at the hubs, not the sprung CG; using cgHeight for
+        % it overstates transfer by the unsprung fraction times
+        % (cgHeight - hubHeight)/cgHeight. Falls back to cgHeight (legacy
+        % behavior) when no tire is wired at construction.
+        hubHeight
+
         % Linear platform stiffness/damping fallback used when no physical
         % suspension is linked. With a linked SuspensionManager, the chassis
         % reacts against the actual corner spring/damper/bump-stop forces so
@@ -40,13 +48,12 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         pitchStiffness    % [N*m/rad]
         pitchDamping      % [N*m*s/rad]
         rollStiffness     % [N*m/rad]  (legacy whole-car; superseded by axle model)
-        rollDamping       = NaN  % [N*m*s/rad]  NaN = derive
+        rollDamping       % [N*m*s/rad]
 
         % Chassis torsional rigidity [N*m/rad]. Couples the front and rear
         % roll DOFs via a torsion spring on (frontRollAngle - rearRollAngle).
-        % A finite value lets the body twist under asymmetric load. Inf is
-        % rejected (numerically unstable with explicit Euler at dt <= 1 ms);
-        % use a large finite value (e.g. 1e6 N*m/rad) for near-rigid torsion.
+        % Inf = perfectly rigid torsionally (front and rear roll together);
+        % a finite value lets the body twist under asymmetric load.
         % Set by lts.vehicle.VehicleManager.fromConfig (e.g. 4000 N*m/deg ~ 229000 N*m/rad).
         torsionalRigidity  % [N*m/rad]
         torsionalDamping   % [N*m*s/rad]
@@ -60,7 +67,7 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         maxIntegrationStep = 0.001
     end
 
-    properties (Transient = true) %#ok<MCNPC>
+    properties (Transient = true)
         % Lazily-cached run invariant: whether the linked suspension exposes
         % getAxleRollStiffness. Empty = uncached.
         cachedSuspensionHasRollStiffness
@@ -69,25 +76,61 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
     methods
         function obj = SimpleChassis(vehicleManager, sprungMass, pitchInertia, rollInertia)
             % SIMPLECHASSIS Construct from lts.vehicle.VehicleManager geometry
-            %   SimpleChassis(vehicleManager)
             %   SimpleChassis(vehicleManager, sprungMass, pitchInertia, rollInertia)
-            if nargin >= 1 && ~isempty(vehicleManager)
-                obj.totalMass = vehicleManager.totalMass;
-                obj.sprungMass = vehicleManager.totalMass;
-                obj.wheelbase = vehicleManager.wheelbase;
-                obj.trackWidth = vehicleManager.trackWidth;
-                obj.cgHeight = vehicleManager.cgHeight;
-                obj.staticFrontWeight = vehicleManager.staticFrontWeight;
+            %
+            % sprungMass is intentionally required. VehicleManager.totalMass
+            % includes the four unsprung corner masses and is therefore not a
+            % physically safe default for the body-attitude inertial terms.
+            if nargin < 1 || isempty(vehicleManager)
+                error('lts_chassis_SimpleChassis:MissingVehicleManager', ...
+                    'SimpleChassis requires a nonempty VehicleManager.');
             end
-            if nargin >= 2 && ~isempty(sprungMass)
-                obj.sprungMass = sprungMass;
+            if nargin < 2 || isempty(sprungMass)
+                error('lts_chassis_SimpleChassis:MissingSprungMass', ...
+                    ['SimpleChassis requires sprungMass explicitly; ' ...
+                    'VehicleManager.totalMass includes unsprung mass.']);
             end
+            obj.validatePositiveScalar(vehicleManager.totalMass, 'totalMass');
+            obj.validatePositiveScalar(vehicleManager.wheelbase, 'wheelbase');
+            obj.validatePositiveScalar(vehicleManager.trackWidth, 'trackWidth');
+            if ~isnumeric(vehicleManager.cgHeight) || ...
+                    ~isreal(vehicleManager.cgHeight) || ...
+                    ~isscalar(vehicleManager.cgHeight) || ...
+                    ~isfinite(vehicleManager.cgHeight) || ...
+                    vehicleManager.cgHeight < 0
+                error('lts_chassis_SimpleChassis:InvalidScalar', ...
+                    'cgHeight must be a finite nonnegative real scalar.');
+            end
+            if ~isnumeric(vehicleManager.staticFrontWeight) || ...
+                    ~isreal(vehicleManager.staticFrontWeight) || ...
+                    ~isscalar(vehicleManager.staticFrontWeight) || ...
+                    ~isfinite(vehicleManager.staticFrontWeight) || ...
+                    vehicleManager.staticFrontWeight < 0 || ...
+                    vehicleManager.staticFrontWeight > 1
+                error('lts_chassis_SimpleChassis:InvalidScalar', ...
+                    'staticFrontWeight must be a finite real scalar in [0, 1].');
+            end
+            obj.validatePositiveScalar(sprungMass, 'sprungMass');
+            if sprungMass > vehicleManager.totalMass
+                error('lts_chassis_SimpleChassis:InvalidSprungMass', ...
+                    'sprungMass (%g kg) cannot exceed totalMass (%g kg).', ...
+                    sprungMass, vehicleManager.totalMass);
+            end
+
+            obj.totalMass = vehicleManager.totalMass;
+            obj.sprungMass = sprungMass;
+            obj.wheelbase = vehicleManager.wheelbase;
+            obj.trackWidth = vehicleManager.trackWidth;
+            obj.cgHeight = vehicleManager.cgHeight;
+            obj.staticFrontWeight = vehicleManager.staticFrontWeight;
             if nargin >= 3 && ~isempty(pitchInertia)
+                obj.validatePositiveScalar(pitchInertia, 'pitchInertia');
                 obj.pitchInertia = pitchInertia;
             else
                 obj.pitchInertia = max(1, obj.sprungMass * obj.wheelbase^2 / 12);
             end
             if nargin >= 4 && ~isempty(rollInertia)
+                obj.validatePositiveScalar(rollInertia, 'rollInertia');
                 obj.rollInertia = rollInertia;
             else
                 obj.rollInertia = max(1, obj.sprungMass * obj.trackWidth^2 / 12);
@@ -100,9 +143,31 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             obj.frontArm = obj.wheelbase * (1 - obj.staticFrontWeight);
             obj.rearArm  = obj.wheelbase * obj.staticFrontWeight;
 
+            % Hub height from the tire rolling radius when wired; else
+            % legacy cgHeight fallback.
+            obj.hubHeight = obj.cgHeight;
+            if ~isempty(vehicleManager.tire) && ...
+                    isprop(vehicleManager.tire, 'FL') && ...
+                    isfinite(vehicleManager.tire.FL.wheelRadius) && ...
+                    vehicleManager.tire.FL.wheelRadius > 0
+                obj.hubHeight = vehicleManager.tire.FL.wheelRadius;
+            end
+
             obj.state = lts.components.Chassis.ChassisState();
             obj.state.updateCornerKinematics( ...
                 obj.wheelbase, obj.trackWidth, obj.staticFrontWeight);
+        end
+
+        function obj = set.torsionalRigidity(obj, value)
+            % Accept +Inf as the exact rigid constraint handled by the roll
+            % integrator, but reject NaN, -Inf, negative, or nonscalar input.
+            if ~isnumeric(value) || ~isreal(value) || ~isscalar(value) || ...
+                    isnan(value) || value < 0 || value == -Inf
+                error('lts_chassis_SimpleChassis:InvalidTorsionalRigidity', ...
+                    ['torsionalRigidity must be a nonnegative real scalar ' ...
+                    'or +Inf (got %s).'], mat2str(value));
+            end
+            obj.torsionalRigidity = value;
         end
 
         function obj = setSuspension(obj, suspension)
@@ -182,6 +247,21 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
 
             [suspensionReaction, useSuspensionReaction] = ...
                 obj.getSuspensionReactionDeltas();
+            % Anti-geometry: the fraction of the sprung longitudinal
+            % transfer reacted through the suspension links instead of the
+            % springs. Under acceleration the rear links react the drive
+            % torque (anti-squat); under braking the front links react the
+            % brake torque (anti-dive). The link-path share bypasses the
+            % pitch DOF and is applied directly to the tire loads below,
+            % conserving the total m*ax*h/L transfer. 0 = legacy spring-only
+            % path (all transfer pitches the body).
+            axAnti = 0;
+            if nonAeroAx > 0
+                axAnti = obj.antiSquatFraction();
+            elseif nonAeroAx < 0
+                axAnti = obj.antiDiveFraction();
+            end
+            axAnti = min(max(axAnti, 0), 1);
             if useSuspensionReaction
                 % Forces are expressed as increments from static equilibrium.
                 % Positive suspension force acts upward on the sprung mass,
@@ -196,14 +276,15 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
                 pitchReaction = ...
                     (suspensionReaction.FL + suspensionReaction.FR) * frontArm - ...
                     (suspensionReaction.RL + suspensionReaction.RR) * rearArm;
-                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight + ...
-                    aeroPitchMoment + pitchReaction;
+                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight * ...
+                    (1 - axAnti) + aeroPitchMoment + pitchReaction;
             else
                 heaveForce = FzFront + FzRear ...
                     - obj.heaveStiffness * obj.state.heave ...
                     - obj.heaveDamping * obj.state.heaveRate;
 
-                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight + aeroPitchMoment ...
+                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight * ...
+                    (1 - axAnti) + aeroPitchMoment ...
                     - obj.pitchStiffness * obj.state.pitchAngle ...
                     - obj.pitchDamping * obj.state.pitchRate;
             end
@@ -214,9 +295,9 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % Each axle is resisted by its own roll stiffness (wheel springs
             % + ARB, read from the suspension so the chassis and load-transfer
             % models agree) and coupled to the other axle by the chassis
-            % torsion spring on the twist angle (frontRollAngle - rearRollAngle).
-            % A large finite torsionalRigidity makes the two ends roll nearly
-            % together; a smaller value lets the body twist under asymmetric
+            % torsion spring on the twist angle (frontRollAngle - rearRollAngle). With
+            % torsionalRigidity = Inf the two ends roll together (perfectly
+            % rigid tub); a finite value lets the body twist under asymmetric
             % load. The legacy whole-car rollAngle is kept as the average.
             massFrac = obj.staticFrontWeight;
             rearMassFrac = 1 - massFrac;
@@ -249,11 +330,15 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
                 max(obj.trackWidth, eps);
 
             % The attitude DOFs represent sprung mass only. Account for the
-            % remainder of the configured total vehicle mass directly at the
-            % contact patches, otherwise load transfer is understated by the
-            % sprung/total mass ratio when unsprung CG data is unavailable.
+            % remainder of the configured total vehicle mass directly at
+            % the contact patches (acting at hub height), otherwise load
+            % transfer is understated by the sprung/total mass ratio when
+            % unsprung CG data is unavailable. The anti-geometry link-path
+            % share of the sprung transfer joins it there.
             additionalMass = max(obj.totalMass - obj.sprungMass, 0);
             additionalLongitudinalTransfer = additionalMass * nonAeroAx * ...
+                obj.hubHeight / max(obj.wheelbase, eps) + ...
+                axAnti * obj.sprungMass * nonAeroAx * ...
                 obj.cgHeight / max(obj.wheelbase, eps);
             additionalFrontMass = additionalMass * massFrac;
             additionalRearMass = additionalMass * rearMassFrac;
@@ -512,6 +597,32 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             rclR = obj.suspension.rearRollCenterLateral;
         end
 
+        function fraction = antiDiveFraction(obj)
+            % Fraction of the sprung longitudinal transfer carried by the
+            % FRONT suspension links under braking (anti-dive) [0-1].
+            fraction = 0;
+            if ~isempty(obj.suspension) && ...
+                    isa(obj.suspension, 'lts.components.Suspension.SuspensionManager')
+                fraction = obj.suspension.frontAntiDiveFraction;
+            end
+            if ~isfinite(fraction)
+                fraction = 0;
+            end
+        end
+
+        function fraction = antiSquatFraction(obj)
+            % Fraction of the sprung longitudinal transfer carried by the
+            % REAR suspension links under acceleration (anti-squat) [0-1].
+            fraction = 0;
+            if ~isempty(obj.suspension) && ...
+                    isa(obj.suspension, 'lts.components.Suspension.SuspensionManager')
+                fraction = obj.suspension.rearAntiSquatFraction;
+            end
+            if ~isfinite(fraction)
+                fraction = 0;
+            end
+        end
+
         function value = scaledRollCenterLateral(~, lateralAt1g, axleAy)
             value = lateralAt1g * axleAy / lts.vehicle.VehicleManager.g;
             if ~isfinite(value)
@@ -556,6 +667,15 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
     end
 
     methods (Static, Access = private)
+        function validatePositiveScalar(value, name)
+            if ~isnumeric(value) || ~isreal(value) || ~isscalar(value) || ...
+                    ~isfinite(value) || value <= 0
+                error('lts_chassis_SimpleChassis:InvalidScalar', ...
+                    '%s must be a finite positive real scalar (got %s).', ...
+                    name, mat2str(value));
+            end
+        end
+
         function value = getStructField(s, fieldName, defaultValue)
             if isstruct(s) && isfield(s, fieldName)
                 value = s.(fieldName);
