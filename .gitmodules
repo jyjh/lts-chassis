@@ -1,4 +1,4 @@
 [submodule "kit"]
 	path = kit
 	url = ../lts-kit
-	branch = main
+	branch = staging
