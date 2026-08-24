@@ -310,10 +310,10 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             rclR = obj.scaledRollCenterLateral(rclRAt1g, rearAxleAy);
             rollMomentF = frontSprungMass * ...
                 (frontAxleAy * (obj.cgHeight - hrcF) + ...
-                lts.vehicle.VehicleManager.g * rclF);
+                lts.util.PhysicalConstants.g * rclF);
             rollMomentR = rearSprungMass * ...
                 (rearAxleAy * (obj.cgHeight - hrcR) + ...
-                lts.vehicle.VehicleManager.g * rclR);
+                lts.util.PhysicalConstants.g * rclR);
 
             % Direct lateral-drag roll moment about the CG. Resolve the
             % force-weighted longitudinal CP between the front/rear roll
@@ -348,9 +348,9 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
                 max(obj.trackWidth, eps);
             additionalElasticMoment = ...
                 additionalFrontMass * (frontAxleAy * (obj.cgHeight - hrcF) + ...
-                    lts.vehicle.VehicleManager.g * rclF) + ...
+                    lts.util.PhysicalConstants.g * rclF) + ...
                 additionalRearMass * (rearAxleAy * (obj.cgHeight - hrcR) + ...
-                    lts.vehicle.VehicleManager.g * rclR);
+                    lts.util.PhysicalConstants.g * rclR);
             frontRollStiffnessFraction = massFrac;
             if ~isempty(obj.suspension) && ...
                     ismethod(obj.suspension, 'deriveFrontRollStiffnessFraction')
@@ -656,7 +656,7 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         end
 
         function value = scaledRollCenterLateral(~, lateralAt1g, axleAy)
-            value = lateralAt1g * axleAy / lts.vehicle.VehicleManager.g;
+            value = lateralAt1g * axleAy / lts.util.PhysicalConstants.g;
             if ~isfinite(value)
                 value = 0;
             end
