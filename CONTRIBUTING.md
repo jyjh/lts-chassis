@@ -31,10 +31,11 @@ protected — you never push branches to this repository directly.
 ## Branch model
 
 - `staging` — where all work lands. PRs from forks target this branch.
-- `main` — stable and release-only. Maintainers merge `staging` → `main`
-  and tag a version (`v1.2.0`). The main integration repository pins its
-  submodule of this repo to `main` tags (or `staging` tips while
-  integrating).
+- `main` — stable, release-only. It advances **only through the release
+  cascade** run from the main `lts` repository (`scripts/release.sh`
+  there): when a release merges, that script fast-forwards this
+  repository's `main` to the proven `staging` tip as part of the same
+  operation. Never merge or PR to `main` directly here.
 
 ## Rules
 
