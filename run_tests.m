@@ -26,7 +26,7 @@ mkdir(pkgDir);
 copyfile(fullfile(root, '*.m'), pkgDir);
 delete(fullfile(pkgDir, 'run_tests.m'));
 if isfolder(fullfile(root, 'data'))
-    copyfile(fullfile(root, 'data'), pkgDir);
+    copyfile(fullfile(root, 'data', '*'), fullfile(pkgDir, 'data'));
 end
 
 utilDir = fullfile(sb, '+lts', '+util');

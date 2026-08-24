@@ -16,7 +16,20 @@ vm = struct( ...
 end
 
 function chassis = chassisFixture()
-chassis = lts.components.Chassis.SimpleChassis(vehicleFixture(), 226.8, 60, 35);
+% Mirror the initialization lts.vehicle.VehicleManager.fromConfig performs:
+% sprung mass plus the eight platform coefficients. Once a suspension is
+% linked the corner forces replace the linear platform terms, but a bare
+% chassis needs them to integrate.
+chassis = lts.components.Chassis.SimpleChassis(vehicleFixture(), 226.8);
+chassis.heaveStiffness = 80000;
+chassis.heaveDamping = 8000;
+chassis.pitchStiffness = 30000;
+chassis.pitchDamping = 3000;
+chassis.rollStiffness = 40000;
+chassis.rollDamping = 4000;
+chassis.torsionalRigidity = 162518;
+chassis.torsionalDamping = 500;
+chassis.reset();
 end
 
 function testConstructorDerivesInertiasAndArms(testCase)
