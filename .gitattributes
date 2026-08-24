@@ -1,0 +1,8 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# MATLAB sources: normalize line endings (the index uses LF)
+*.m text eol=lf
+
+# MATLAB data assets are binary
+*.mat binary

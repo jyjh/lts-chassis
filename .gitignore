@@ -1,0 +1,6 @@
+# Standalone test sandbox assembled by run_tests.m
+/build/
+
+# Python
+__pycache__/
+*.pyc
