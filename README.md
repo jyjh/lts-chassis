@@ -27,7 +27,7 @@ The runner assembles a temporary `+lts` package sandbox in `build/`
 
 ## Branch model and workflow
 
-- `staging` — where PRs from forks land. `main` — stable, release-only.
+- `staging` — where PRs from forks land. `main` — stable, release-only; it advances only via the release cascade from the main `lts` repository.
 - All development is done on forks; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Contract with the main repository
