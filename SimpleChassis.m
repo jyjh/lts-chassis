@@ -68,9 +68,10 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
     end
 
     properties (Transient = true)
-        % Lazily-cached run invariant: whether the linked suspension exposes
-        % getAxleRollStiffness. Empty = uncached.
-        cachedSuspensionHasRollStiffness
+        % Lazily-cached run invariant: whether the linked suspension
+        % provides the full chassis-facing interface (see
+        % providesSuspensionInterface). Empty = uncached.
+        cachedHasLinkedSuspension
     end
 
     methods
@@ -176,9 +177,8 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % stiffness (springs + anti-roll bars), keeping the two roll
             % models consistent. Call after both are constructed.
             obj.suspension = suspension;
-            obj.cachedSuspensionHasRollStiffness = ...
-                ~isempty(suspension) && ...
-                isa(suspension, 'lts.components.Suspension.SuspensionManager');
+            obj.cachedHasLinkedSuspension = ...
+                obj.providesSuspensionInterface(suspension);
         end
 
         function reset(obj)
@@ -553,14 +553,49 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
     end
 
     methods (Access = private)
+        function tf = hasLinkedSuspension(obj)
+            % HASLINKEDSUSPENSION True when a suspension providing the full
+            % chassis-facing interface is linked. Consults the cache filled
+            % by setSuspension; falls back to a structural probe when the
+            % suspension property was assigned directly.
+            if isempty(obj.suspension)
+                tf = false;
+                return;
+            end
+            if isempty(obj.cachedHasLinkedSuspension)
+                tf = obj.providesSuspensionInterface(obj.suspension);
+            else
+                tf = obj.cachedHasLinkedSuspension;
+            end
+        end
+
+        function tf = providesSuspensionInterface(~, s)
+            % PROVIDESSUSPENSIONINTERFACE Structural check for everything the
+            % chassis reads from the linked suspension: four corner units
+            % with per-corner load state, roll-center and anti-geometry
+            % properties, and per-axle roll stiffness. Deliberately not an
+            % isa() on lts.components.Suspension.SuspensionManager so the
+            % Chassis and Suspension packages remain usable independently of
+            % each other (planned repository split; see docs/repo-split/).
+            tf = ~isempty(s) && ...
+                isprop(s, 'frontLeft') && isprop(s, 'frontRight') && ...
+                isprop(s, 'rearLeft') && isprop(s, 'rearRight') && ...
+                isprop(s, 'frontRollCenterHeight') && ...
+                isprop(s, 'rearRollCenterHeight') && ...
+                isprop(s, 'frontRollCenterLateral') && ...
+                isprop(s, 'rearRollCenterLateral') && ...
+                isprop(s, 'frontAntiDiveFraction') && ...
+                isprop(s, 'rearAntiSquatFraction') && ...
+                ismethod(s, 'getAxleRollStiffness');
+        end
+
         function [reaction, available] = getSuspensionReactionDeltas(obj)
             % GETSUSPENSIONREACTIONDELTAS Corner reactions above static load.
             % The SuspensionState forces act upward on the sprung chassis;
             % subtracting staticLoad keeps the chassis coordinates referenced
             % to their zero-force static equilibrium.
             reaction = struct('FL', 0, 'FR', 0, 'RL', 0, 'RR', 0);
-            available = ~isempty(obj.suspension) && ...
-                isa(obj.suspension, 'lts.components.Suspension.SuspensionManager');
+            available = obj.hasLinkedSuspension();
             if ~available
                 return;
             end
@@ -586,8 +621,7 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             hrcR = 0;
             rclF = 0;
             rclR = 0;
-            if isempty(obj.suspension) || ...
-                    ~isa(obj.suspension, 'lts.components.Suspension.SuspensionManager')
+            if ~obj.hasLinkedSuspension()
                 return;
             end
 
@@ -601,8 +635,7 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % Fraction of the sprung longitudinal transfer carried by the
             % FRONT suspension links under braking (anti-dive) [0-1].
             fraction = 0;
-            if ~isempty(obj.suspension) && ...
-                    isa(obj.suspension, 'lts.components.Suspension.SuspensionManager')
+            if obj.hasLinkedSuspension()
                 fraction = obj.suspension.frontAntiDiveFraction;
             end
             if ~isfinite(fraction)
@@ -614,8 +647,7 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % Fraction of the sprung longitudinal transfer carried by the
             % REAR suspension links under acceleration (anti-squat) [0-1].
             fraction = 0;
-            if ~isempty(obj.suspension) && ...
-                    isa(obj.suspension, 'lts.components.Suspension.SuspensionManager')
+            if obj.hasLinkedSuspension()
                 fraction = obj.suspension.rearAntiSquatFraction;
             end
             if ~isfinite(fraction)
@@ -638,12 +670,7 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % Returns 0,0 when no suspension is linked.
             KrollF = 0;
             KrollR = 0;
-            hasRollStiffness = obj.cachedSuspensionHasRollStiffness;
-            if isempty(hasRollStiffness)
-                hasRollStiffness = ~isempty(obj.suspension) && ...
-                    isa(obj.suspension, 'lts.components.Suspension.SuspensionManager');
-            end
-            if hasRollStiffness
+            if obj.hasLinkedSuspension()
                 [KwF, KwR] = obj.suspension.getAxleRollStiffness();
                 KrollF = KwF * obj.trackWidth^2 / 2;
                 KrollR = KwR * obj.trackWidth^2 / 2;
