@@ -41,4 +41,9 @@ The runner assembles a temporary `+lts` package sandbox in `build/`
   object exposing the four corner units, roll-center/anti-geometry
   properties, and `getAxleRollStiffness`. Nothing in this package
   references `+Suspension` (or any other component package) by name.
+- `tests/ConformanceTest.m` pins the `cfg.chassis` schema
+  (`validateConfig`), the `ChassisComponent` interface, and the
+  `ChassisState` property names feeding the attitude telemetry channels.
+  Renaming any of them is a **contract change** — see "Changing the
+  contract" on the [Contracts page](https://jyjh.github.io/lts/contracts/).
 - Details: <https://jyjh.github.io/lts/repo-split/>
