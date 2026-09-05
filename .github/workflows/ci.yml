@@ -6,6 +6,22 @@ on:
   pull_request:
 
 jobs:
+  # main is updated exclusively by the parent repo's release.sh (staging ->
+  # main propagation, pushed directly by the ruleset bypass actor). A pull
+  # request targeting main is therefore always a mistake: work lands on
+  # staging first.
+  pr-target:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject PRs targeting main
+        run: |
+          if [ "${{ github.base_ref }}" = "main" ]; then
+            echo "::error::PRs must target 'staging'. main is updated only by release.sh."
+            exit 1
+          fi
+
+
   matlab-tests:
     runs-on: ubuntu-latest
     # Free MATLAB on GitHub-hosted runners requires this repository to be
