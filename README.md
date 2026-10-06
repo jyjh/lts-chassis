@@ -47,3 +47,17 @@ The runner assembles a temporary `+lts` package sandbox in `build/`
   Renaming any of them is a **contract change** — see "Changing the
   contract" on the [Contracts page](https://jyjh.github.io/lts/contracts/).
 - Details: <https://jyjh.github.io/lts/repo-split/>
+
+## Sprung and unsprung load transfer
+
+`cgHeight` is the whole-vehicle CG height. The sprung height is recovered from
+`m_s*h_s = m_total*h_total - m_u*h_hub`, preserving the total roll and pitch
+moment when the hub contribution is separated. Hub height remains a rolling-
+radius approximation (or whole-vehicle CG height when no tire is available).
+
+Unsprung lateral transfer is local to each axle: `m_u_axle * ay_axle *
+h_hub / trackWidth`. It never uses the spring/ARB stiffness split. Where the
+linked corners expose `unsprungMass`, their actual axle sums are used and must
+match `totalMass - sprungMass`; older structural implementations retain the
+static-weight-distribution approximation. Existing interfaces, configuration
+field names, and telemetry names are unchanged.
