@@ -48,3 +48,36 @@ verifyEqual(testCase, c.state.frontAdditionalLateralLoadTransfer, ...
 verifyEqual(testCase, c.state.rearAdditionalLateralLoadTransfer, ...
     22 * -6 * .22 / c.trackWidth, 'AbsTol', 1e-12);
 end
+
+function testCachedCapabilityKeepsMassesAndReplacementCornersLive(testCase)
+[c, s] = fixture();
+c.updateFromAccelerations(0,6,struct(),0,0);
+s.frontLeft.unsprungMass = 7; s.frontRight.unsprungMass = 7;
+s.rearLeft.unsprungMass = 11; s.rearRight.unsprungMass = 11;
+c.updateFromAccelerations(0,6,struct(),0,0);
+verifyEqual(testCase,c.state.frontAdditionalLateralLoadTransfer, ...
+    14*6*.22/c.trackWidth,'AbsTol',1e-12);
+s.frontLeft = UnsprungCornerSpy(); s.frontLeft.unsprungMass = 7;
+c.updateFromAccelerations(0,6,struct(),0,0);
+verifyEqual(testCase,c.state.frontAdditionalLateralLoadTransfer, ...
+    14*6*.22/c.trackWidth,'AbsTol',1e-12);
+s.frontLeft.unsprungMass = 8;
+verifyError(testCase,@() c.updateFromAccelerations(0,6,struct(),0,0), ...
+    'lts_chassis_SimpleChassis:InvalidSprungMass');
+end
+
+function testDynamicMassPropertyInvalidatesCapability(testCase)
+[c,s] = fixture();
+s.frontLeft = DynamicUnsprungCornerSpy();
+c.updateFromAccelerations(0,6,struct(),0,0);
+verifyEqual(testCase,c.state.frontAdditionalLateralLoadTransfer, ...
+    36*.6*6*.22/c.trackWidth,'AbsTol',1e-12);
+p = addprop(s.frontLeft,'unsprungMass'); s.frontLeft.unsprungMass = 9;
+c.updateFromAccelerations(0,6,struct(),0,0);
+verifyEqual(testCase,c.state.frontAdditionalLateralLoadTransfer, ...
+    18*6*.22/c.trackWidth,'AbsTol',1e-12);
+delete(p);
+c.updateFromAccelerations(0,6,struct(),0,0);
+verifyEqual(testCase,c.state.frontAdditionalLateralLoadTransfer, ...
+    36*.6*6*.22/c.trackWidth,'AbsTol',1e-12);
+end

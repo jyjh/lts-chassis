@@ -61,3 +61,8 @@ linked corners expose `unsprungMass`, their actual axle sums are used and must
 match `totalMass - sprungMass`; older structural implementations retain the
 static-weight-distribution approximation. Existing interfaces, configuration
 field names, and telemetry names are unchanged.
+
+Corner mass capabilities are cached by class, with live reflection for
+dynamic properties. Corner masses and mass-consistency checks are evaluated
+on every update, including after same-class corner replacement. The cache
+stores neither masses nor corner handles.

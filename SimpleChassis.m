@@ -74,6 +74,10 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         cachedHasLinkedSuspension
     end
 
+    properties (Access = private, Transient)
+        unsprungCapabilityCache = lts.components.Chassis.UnsprungCapabilityCache()
+    end
+
     methods
         function obj = SimpleChassis(vehicleManager, sprungMass, pitchInertia, rollInertia)
             % SIMPLECHASSIS Construct from lts.vehicle.VehicleManager geometry
@@ -543,15 +547,26 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             total = obj.totalMass - obj.sprungMass;
             frontMass = total * obj.staticFrontWeight;
             rearMass = total - frontMass;
-            if obj.hasLinkedSuspension() && ...
-                    isprop(obj.suspension.frontLeft, 'unsprungMass') && ...
-                    isprop(obj.suspension.frontRight, 'unsprungMass') && ...
-                    isprop(obj.suspension.rearLeft, 'unsprungMass') && ...
-                    isprop(obj.suspension.rearRight, 'unsprungMass')
-                frontMass = obj.suspension.frontLeft.unsprungMass + ...
-                    obj.suspension.frontRight.unsprungMass;
-                rearMass = obj.suspension.rearLeft.unsprungMass + ...
-                    obj.suspension.rearRight.unsprungMass;
+            if obj.hasLinkedSuspension()
+                units = {obj.suspension.frontLeft, obj.suspension.frontRight, ...
+                    obj.suspension.rearLeft, obj.suspension.rearRight};
+                classes = cell(1, 4);
+                dynamic = false;
+                for idx = 1:4
+                    classes{idx} = class(units{idx});
+                    dynamic = dynamic || isa(units{idx}, 'dynamicprops');
+                end
+                cache = obj.unsprungCapabilityCache;
+                if ~isequal(classes, cache.cornerClasses) || dynamic
+                    cache.hasMass = isprop(units{1}, 'unsprungMass') && ...
+                        isprop(units{2}, 'unsprungMass') && ...
+                        isprop(units{3}, 'unsprungMass') && ...
+                        isprop(units{4}, 'unsprungMass');
+                    cache.cornerClasses = classes;
+                end
+                if ~cache.hasMass, return; end
+                frontMass = units{1}.unsprungMass + units{2}.unsprungMass;
+                rearMass = units{3}.unsprungMass + units{4}.unsprungMass;
                 if abs(frontMass + rearMass - total) > 1e-8 * max(1, total)
                     error('lts_chassis_SimpleChassis:InvalidSprungMass', ...
                         'Corner unsprung masses must sum to totalMass - sprungMass.');
