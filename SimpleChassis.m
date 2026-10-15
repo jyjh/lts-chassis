@@ -74,6 +74,10 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
         cachedHasLinkedSuspension
     end
 
+    properties (Access = private, Transient)
+        unsprungCapabilityCache = lts.components.Chassis.UnsprungCapabilityCache()
+    end
+
     methods
         function obj = SimpleChassis(vehicleManager, sprungMass, pitchInertia, rollInertia)
             % SIMPLECHASSIS Construct from lts.vehicle.VehicleManager geometry
@@ -247,6 +251,12 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
 
             [suspensionReaction, useSuspensionReaction] = ...
                 obj.getSuspensionReactionDeltas();
+            [frontUnsprungMass, rearUnsprungMass] = obj.getUnsprungAxleMasses();
+            additionalMass = frontUnsprungMass + rearUnsprungMass;
+            % cgHeight describes the complete vehicle. Recover the sprung
+            % height so separating the hub contribution preserves m*h.
+            sprungCgHeight = (obj.totalMass * obj.cgHeight - ...
+                additionalMass * obj.hubHeight) / obj.sprungMass;
             % Anti-geometry: the fraction of the sprung longitudinal
             % transfer reacted through the suspension links instead of the
             % springs. Under acceleration the rear links react the drive
@@ -276,14 +286,14 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
                 pitchReaction = ...
                     (suspensionReaction.FL + suspensionReaction.FR) * frontArm - ...
                     (suspensionReaction.RL + suspensionReaction.RR) * rearArm;
-                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight * ...
+                pitchMoment = obj.sprungMass * nonAeroAx * sprungCgHeight * ...
                     (1 - axAnti) + aeroPitchMoment + pitchReaction;
             else
                 heaveForce = FzFront + FzRear ...
                     - obj.heaveStiffness * obj.state.heave ...
                     - obj.heaveDamping * obj.state.heaveRate;
 
-                pitchMoment = obj.sprungMass * nonAeroAx * obj.cgHeight * ...
+                pitchMoment = obj.sprungMass * nonAeroAx * sprungCgHeight * ...
                     (1 - axAnti) + aeroPitchMoment ...
                     - obj.pitchStiffness * obj.state.pitchAngle ...
                     - obj.pitchDamping * obj.state.pitchRate;
@@ -303,16 +313,16 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             rearMassFrac = 1 - massFrac;
             frontAxleAy = nonAeroAy + yawAccel * obj.frontArm;
             rearAxleAy  = nonAeroAy - yawAccel * obj.rearArm;
-            frontSprungMass = obj.sprungMass * massFrac;
-            rearSprungMass = obj.sprungMass * rearMassFrac;
+            frontSprungMass = obj.totalMass * massFrac - frontUnsprungMass;
+            rearSprungMass = obj.totalMass * rearMassFrac - rearUnsprungMass;
             [hrcF, hrcR, rclFAt1g, rclRAt1g] = obj.getRollCenterConfig();
             rclF = obj.scaledRollCenterLateral(rclFAt1g, frontAxleAy);
             rclR = obj.scaledRollCenterLateral(rclRAt1g, rearAxleAy);
             rollMomentF = frontSprungMass * ...
-                (frontAxleAy * (obj.cgHeight - hrcF) + ...
+                (frontAxleAy * (sprungCgHeight - hrcF) + ...
                 lts.util.PhysicalConstants.g * rclF);
             rollMomentR = rearSprungMass * ...
-                (rearAxleAy * (obj.cgHeight - hrcR) + ...
+                (rearAxleAy * (sprungCgHeight - hrcR) + ...
                 lts.util.PhysicalConstants.g * rclR);
 
             % Direct lateral-drag roll moment about the CG. Resolve the
@@ -335,36 +345,16 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
             % transfer is understated by the sprung/total mass ratio when
             % unsprung CG data is unavailable. The anti-geometry link-path
             % share of the sprung transfer joins it there.
-            additionalMass = max(obj.totalMass - obj.sprungMass, 0);
             additionalLongitudinalTransfer = additionalMass * nonAeroAx * ...
                 obj.hubHeight / max(obj.wheelbase, eps) + ...
                 axAnti * obj.sprungMass * nonAeroAx * ...
-                obj.cgHeight / max(obj.wheelbase, eps);
-            additionalFrontMass = additionalMass * massFrac;
-            additionalRearMass = additionalMass * rearMassFrac;
-            additionalGeoFront = additionalFrontMass * frontAxleAy * hrcF / ...
-                max(obj.trackWidth, eps);
-            additionalGeoRear = additionalRearMass * rearAxleAy * hrcR / ...
-                max(obj.trackWidth, eps);
-            additionalElasticMoment = ...
-                additionalFrontMass * (frontAxleAy * (obj.cgHeight - hrcF) + ...
-                    lts.util.PhysicalConstants.g * rclF) + ...
-                additionalRearMass * (rearAxleAy * (obj.cgHeight - hrcR) + ...
-                    lts.util.PhysicalConstants.g * rclR);
-            frontRollStiffnessFraction = massFrac;
-            if ~isempty(obj.suspension) && ...
-                    ismethod(obj.suspension, 'deriveFrontRollStiffnessFraction')
-                frontRollStiffnessFraction = ...
-                    obj.suspension.deriveFrontRollStiffnessFraction();
-            end
-            frontRollStiffnessFraction = lts.util.clamp( ...
-                frontRollStiffnessFraction, 0, 1);
-            additionalElasticTransfer = additionalElasticMoment / ...
-                max(obj.trackWidth, eps);
-            additionalLatFront = additionalGeoFront + ...
-                additionalElasticTransfer * frontRollStiffnessFraction;
-            additionalLatRear = additionalGeoRear + ...
-                additionalElasticTransfer * (1 - frontRollStiffnessFraction);
+                sprungCgHeight / max(obj.wheelbase, eps);
+            % Unsprung lateral moments stay at their own axle and bypass
+            % the sprung roll DOFs. ARB tuning must not redistribute them.
+            additionalLatFront = frontUnsprungMass * frontAxleAy * ...
+                obj.hubHeight / obj.trackWidth;
+            additionalLatRear = rearUnsprungMass * rearAxleAy * ...
+                obj.hubHeight / obj.trackWidth;
 
             twist = obj.state.frontRollAngle - obj.state.rearRollAngle;
             Kt = obj.torsionalRigidity;
@@ -553,6 +543,37 @@ classdef SimpleChassis < lts.components.Chassis.ChassisComponent
     end
 
     methods (Access = private)
+        function [frontMass, rearMass] = getUnsprungAxleMasses(obj)
+            total = obj.totalMass - obj.sprungMass;
+            frontMass = total * obj.staticFrontWeight;
+            rearMass = total - frontMass;
+            if obj.hasLinkedSuspension()
+                units = {obj.suspension.frontLeft, obj.suspension.frontRight, ...
+                    obj.suspension.rearLeft, obj.suspension.rearRight};
+                classes = cell(1, 4);
+                dynamic = false;
+                for idx = 1:4
+                    classes{idx} = class(units{idx});
+                    dynamic = dynamic || isa(units{idx}, 'dynamicprops');
+                end
+                cache = obj.unsprungCapabilityCache;
+                if ~isequal(classes, cache.cornerClasses) || dynamic
+                    cache.hasMass = isprop(units{1}, 'unsprungMass') && ...
+                        isprop(units{2}, 'unsprungMass') && ...
+                        isprop(units{3}, 'unsprungMass') && ...
+                        isprop(units{4}, 'unsprungMass');
+                    cache.cornerClasses = classes;
+                end
+                if ~cache.hasMass, return; end
+                frontMass = units{1}.unsprungMass + units{2}.unsprungMass;
+                rearMass = units{3}.unsprungMass + units{4}.unsprungMass;
+                if abs(frontMass + rearMass - total) > 1e-8 * max(1, total)
+                    error('lts_chassis_SimpleChassis:InvalidSprungMass', ...
+                        'Corner unsprung masses must sum to totalMass - sprungMass.');
+                end
+            end
+        end
+
         function tf = hasLinkedSuspension(obj)
             % HASLINKEDSUSPENSION True when a suspension providing the full
             % chassis-facing interface is linked. Consults the cache filled
